@@ -31,8 +31,10 @@
 #include "strategy.hpp"
 #include "common/global.hpp"
 #include "common/logger.hpp"
+#include "rib/service.hpp"
 #include "table/cleanup.hpp"
 
+#include <ndn-cxx/kite/ack.hpp>
 #include <ndn-cxx/lp/pit-token.hpp>
 #include <ndn-cxx/lp/tags.hpp>
 
@@ -318,6 +320,14 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     return;
   }
 
+  // Side hook: a Data carrying ContentType_KiteAck installs a reverse-path
+  // RIB entry along every non-local upstream that contributed the matching
+  // KITE Request. The Data then continues through the normal CS / strategy
+  // pipeline so the originating mobile producer also receives the Ack.
+  if (data.getContentType() == tlv::ContentType_KiteAck) {
+    this->onIncomingKiteAck(data, pitMatches);
+  }
+
   // CS insert
   m_cs.insert(data);
 
@@ -384,6 +394,55 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       }
       // go to outgoing Data pipeline
       this->onOutgoingData(data, *pendingDownstream);
+    }
+  }
+}
+
+void
+Forwarder::onIncomingKiteAck(const Data& data, const pit::DataMatchResult& pitMatches)
+{
+  NFD_LOG_DEBUG("onIncomingKiteAck data=" << data.getName());
+
+  std::optional<ndn::kite::Ack> ack;
+  try {
+    ack.emplace(data);
+  }
+  catch (const std::invalid_argument& e) {
+    NFD_LOG_DEBUG("onIncomingKiteAck data=" << data.getName()
+                  << " malformed KITE Ack: " << e.what());
+    return;
+  }
+
+  const auto& pa = ack->getPrefixAnnouncement();
+  if (!pa) {
+    NFD_LOG_DEBUG("onIncomingKiteAck data=" << data.getName()
+                  << " missing PrefixAnnouncement");
+    return;
+  }
+
+  for (const auto& pitEntry : pitMatches) {
+    NFD_LOG_DEBUG("onIncomingKiteAck processing=" << pitEntry->getName());
+
+    // Install a reverse-path RIB entry on every non-local, still-pending
+    // upstream face that contributed the original KITE Request. Posted to
+    // the RIB thread because slAnnounce is only safe to call from there.
+    for (const pit::InRecord& inRecord : pitEntry->getInRecords()) {
+      const Face& inFace = inRecord.getFace();
+      if (inFace.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
+        continue;
+      }
+      if (inRecord.getExpiry() <= time::steady_clock::now()) {
+        continue;
+      }
+
+      boost::asio::post(getRibIoService(),
+        [inFaceId = inFace.getId(), pa = *pa] {
+          rib::Service::get().getRibManager().slAnnounce(
+            pa, inFaceId, 5_min,
+            [] (RibManager::SlAnnounceResult res) {
+              NFD_LOG_DEBUG("KITE slAnnounce result=" << res);
+            });
+        });
     }
   }
 }

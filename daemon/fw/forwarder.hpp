@@ -177,6 +177,18 @@ NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE: // pipelines
   NFD_VIRTUAL_WITH_TESTS void
   onIncomingData(const Data& data, const FaceEndpoint& ingress);
 
+  /** \brief Incoming KITE acknowledgment pipeline.
+   *
+   *  Invoked from onIncomingData() when an incoming Data carries
+   *  ContentType=ContentType_KiteAck and matches at least one PIT entry.
+   *  For every non-local, still-pending PIT in-record on the reverse path
+   *  of the original KITE Request, posts an slAnnounce request on the RIB
+   *  thread so the PrefixAnnouncement embedded in the Ack is installed as
+   *  a route entry toward the mobile producer.
+   */
+  NFD_VIRTUAL_WITH_TESTS void
+  onIncomingKiteAck(const Data& data, const pit::DataMatchResult& pitMatches);
+
   /** \brief Data unsolicited pipeline.
    */
   NFD_VIRTUAL_WITH_TESTS void
